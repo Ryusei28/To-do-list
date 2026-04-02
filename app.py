@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import streamlit as st
 from streamlit_calendar import calendar
@@ -17,9 +17,6 @@ local_storage = LocalStorage()
 STORAGE_KEY = "todo_calendar_app_tasks_v1"
 
 
-# -----------------------------
-# Utility
-# -----------------------------
 def today_str() -> str:
     return date.today().isoformat()
 
@@ -38,11 +35,11 @@ def generate_id() -> str:
 
 
 def load_tasks():
-    """
-    local storage からタスク一覧を読む。
-    初回や空の場合は [] を返す。
-    """
-    stored = local_storage.getItem(STORAGE_KEY, key="load_tasks")
+    try:
+        stored = local_storage.getItem(STORAGE_KEY)
+    except TypeError:
+        return []
+
     if stored is None or stored == "":
         return []
 
@@ -61,16 +58,13 @@ def load_tasks():
 
 
 def save_tasks(tasks):
-    """
-    local storage に JSON 文字列として保存。
-    """
-    local_storage.setItem(STORAGE_KEY, json.dumps(tasks), key="save_tasks")
+    local_storage.setItem(
+        STORAGE_KEY,
+        json.dumps(tasks, ensure_ascii=False)
+    )
 
 
 def normalize_tasks(tasks):
-    """
-    旧データが混じっていても最低限動くように整形。
-    """
     normalized = []
     for task in tasks:
         normalized.append(
@@ -89,12 +83,12 @@ def normalize_tasks(tasks):
 
 def get_priority_color(priority: str, status: str) -> str:
     if status == "完了":
-        return "#9CA3AF"  # gray
+        return "#9CA3AF"
     if priority == "高":
-        return "#EF4444"  # red
+        return "#EF4444"
     if priority == "中":
-        return "#F59E0B"  # amber
-    return "#3B82F6"      # blue
+        return "#F59E0B"
+    return "#3B82F6"
 
 
 def tasks_to_calendar_events(tasks):
@@ -105,12 +99,12 @@ def tasks_to_calendar_events(tasks):
 
         color = get_priority_color(task["priority"], task["status"])
         title_prefix = "✓ " if task["status"] == "完了" else ""
+
         events.append(
             {
                 "id": task["id"],
                 "title": f"{title_prefix}{task['title']}",
                 "start": task["due_date"],
-                "end": task["due_date"],
                 "allDay": True,
                 "color": color,
                 "extendedProps": {
@@ -188,10 +182,6 @@ def sort_tasks(tasks, sort_option):
 
 
 def get_selected_date_from_calendar(calendar_value):
-    """
-    calendar の戻り値から選択日を取り出す。
-    日付クリック、イベントクリックの両方に対応。
-    """
     if not calendar_value or not isinstance(calendar_value, dict):
         return None
 
@@ -204,7 +194,8 @@ def get_selected_date_from_calendar(calendar_value):
     if callback == "eventClick":
         event_click = calendar_value.get("eventClick", {})
         event = event_click.get("event", {})
-        return event.get("start", "")[:10]
+        start_value = event.get("start", "")
+        return start_value[:10] if start_value else None
 
     return None
 
@@ -218,9 +209,6 @@ def is_overdue(task):
     )
 
 
-# -----------------------------
-# Init state
-# -----------------------------
 if "tasks" not in st.session_state:
     loaded = normalize_tasks(load_tasks())
     st.session_state.tasks = loaded
@@ -229,32 +217,30 @@ if "selected_date" not in st.session_state:
     st.session_state.selected_date = None
 
 if "last_saved_json" not in st.session_state:
-    st.session_state.last_saved_json = json.dumps(st.session_state.tasks, ensure_ascii=False)
+    st.session_state.last_saved_json = json.dumps(
+        st.session_state.tasks,
+        ensure_ascii=False
+    )
 
 
-# -----------------------------
-# Sync save when tasks changed
-# -----------------------------
 current_json = json.dumps(st.session_state.tasks, ensure_ascii=False)
 if current_json != st.session_state.last_saved_json:
     save_tasks(st.session_state.tasks)
     st.session_state.last_saved_json = current_json
 
 
-# -----------------------------
-# Header
-# -----------------------------
 st.title("✅ やることリスト + カレンダー")
 st.caption("同じブラウザなら、ページを閉じてもタスクが残る版")
 
 
-# -----------------------------
-# Top summary
-# -----------------------------
 all_tasks = st.session_state.tasks
 overall_progress = calculate_progress(all_tasks)
 today = date.today()
-month_progress, month_task_count = calculate_month_progress(all_tasks, today.year, today.month)
+month_progress, month_task_count = calculate_month_progress(
+    all_tasks,
+    today.year,
+    today.month
+)
 
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 col_m1.metric("全タスク数", len(all_tasks))
@@ -265,9 +251,6 @@ col_m4.metric("今月達成率", f"{month_progress}%")
 st.progress(min(overall_progress / 100, 1.0))
 
 
-# -----------------------------
-# Add task form
-# -----------------------------
 with st.expander("＋ 新しいタスクを追加", expanded=True):
     with st.form("add_task_form", clear_on_submit=True):
         title = st.text_input("タスク名")
@@ -293,21 +276,16 @@ with st.expander("＋ 新しいタスクを追加", expanded=True):
                 st.session_state.tasks.append(new_task)
                 save_tasks(st.session_state.tasks)
                 st.session_state.last_saved_json = json.dumps(
-                    st.session_state.tasks, ensure_ascii=False
+                    st.session_state.tasks,
+                    ensure_ascii=False
                 )
                 st.success("タスクを追加しました。")
                 st.rerun()
 
 
-# -----------------------------
-# Layout
-# -----------------------------
 left_col, right_col = st.columns([1.15, 1.0])
 
 
-# -----------------------------
-# Calendar
-# -----------------------------
 with left_col:
     st.subheader("📅 カレンダー")
 
@@ -360,9 +338,6 @@ with left_col:
             st.rerun()
 
 
-# -----------------------------
-# Filters + task list
-# -----------------------------
 with right_col:
     st.subheader("📝 タスク一覧")
 
@@ -400,9 +375,7 @@ with right_col:
                         key=f"check_{task['id']}"
                     )
                 with top2:
-                    st.markdown(
-                        f"**{task['priority']}** / {due}{overdue_text}"
-                    )
+                    st.markdown(f"**{task['priority']}** / {due}{overdue_text}")
 
                 if task["memo"]:
                     st.caption(task["memo"])
@@ -411,7 +384,8 @@ with right_col:
                     task["status"] = "完了" if new_status else "未完了"
                     save_tasks(st.session_state.tasks)
                     st.session_state.last_saved_json = json.dumps(
-                        st.session_state.tasks, ensure_ascii=False
+                        st.session_state.tasks,
+                        ensure_ascii=False
                     )
                     st.rerun()
 
@@ -427,12 +401,21 @@ with right_col:
                         index=["高", "中", "低"].index(task["priority"]),
                         key=f"priority_{task['id']}"
                     )
+
+                    current_due = safe_parse_date(task["due_date"])
                     edit_due = st.date_input(
                         "期限",
-                        value=safe_parse_date(task["due_date"]),
+                        value=current_due if current_due else date.today(),
                         key=f"due_{task['id']}",
                         format="YYYY-MM-DD"
                     )
+
+                    no_due = st.checkbox(
+                        "期限を設定しない",
+                        value=(task["due_date"] == ""),
+                        key=f"no_due_{task['id']}"
+                    )
+
                     edit_memo = st.text_area(
                         "メモ",
                         value=task["memo"],
@@ -443,11 +426,12 @@ with right_col:
                     if btn1.button("保存", key=f"save_{task['id']}"):
                         task["title"] = edit_title.strip()
                         task["priority"] = edit_priority
-                        task["due_date"] = edit_due.isoformat() if edit_due else ""
+                        task["due_date"] = "" if no_due else edit_due.isoformat()
                         task["memo"] = edit_memo.strip()
                         save_tasks(st.session_state.tasks)
                         st.session_state.last_saved_json = json.dumps(
-                            st.session_state.tasks, ensure_ascii=False
+                            st.session_state.tasks,
+                            ensure_ascii=False
                         )
                         st.success("更新しました。")
                         st.rerun()
@@ -459,15 +443,13 @@ with right_col:
                         ]
                         save_tasks(st.session_state.tasks)
                         st.session_state.last_saved_json = json.dumps(
-                            st.session_state.tasks, ensure_ascii=False
+                            st.session_state.tasks,
+                            ensure_ascii=False
                         )
                         st.warning("削除しました。")
                         st.rerun()
 
 
-# -----------------------------
-# Bottom utilities
-# -----------------------------
 st.divider()
 st.subheader("⚙️ 便利機能")
 
@@ -500,9 +482,6 @@ with u3:
         st.rerun()
 
 
-# -----------------------------
-# Debug / export
-# -----------------------------
 with st.expander("データ確認 / バックアップ"):
     st.download_button(
         label="JSONをダウンロード",
@@ -510,4 +489,7 @@ with st.expander("データ確認 / バックアップ"):
         file_name="tasks_backup.json",
         mime="application/json",
     )
-    st.code(json.dumps(st.session_state.tasks, ensure_ascii=False, indent=2), language="json")
+    st.code(
+        json.dumps(st.session_state.tasks, ensure_ascii=False, indent=2),
+        language="json"
+    )
