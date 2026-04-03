@@ -1,10 +1,9 @@
-import json
 import uuid
 from datetime import date, datetime
 
 import streamlit as st
+from supabase import create_client
 from streamlit_calendar import calendar
-from streamlit_local_storage import LocalStorage
 
 
 st.set_page_config(
@@ -13,19 +12,39 @@ st.set_page_config(
     layout="wide",
 )
 
-local_storage = LocalStorage()
-STORAGE_KEY = "todo_calendar_app_tasks_v1"
+
+# -----------------------------
+# Supabase connection
+# -----------------------------
+@st.cache_resource
+def init_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 
+supabase = init_supabase()
+
+
+# -----------------------------
+# Utility
+# -----------------------------
 def today_str() -> str:
     return date.today().isoformat()
 
 
-def safe_parse_date(value: str):
+def safe_parse_date(value):
     if not value:
         return None
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, datetime):
+        return value.date()
+
     try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
     except ValueError:
         return None
 
@@ -34,53 +53,72 @@ def generate_id() -> str:
     return str(uuid.uuid4())
 
 
+def normalize_task(task: dict) -> dict:
+    return {
+        "id": task.get("id", generate_id()),
+        "title": task.get("title", "").strip(),
+        "status": task.get("status", "未完了"),
+        "priority": task.get("priority", "中"),
+        "due_date": str(task["due_date"]) if task.get("due_date") else "",
+        "memo": task.get("memo", "") or "",
+        "created_at": task.get("created_at", ""),
+    }
+
+
+# -----------------------------
+# Database operations
+# -----------------------------
 def load_tasks():
-    try:
-        stored = local_storage.getItem(STORAGE_KEY)
-    except TypeError:
-        return []
-
-    if stored is None or stored == "":
-        return []
-
-    if isinstance(stored, list):
-        return stored
-
-    if isinstance(stored, str):
-        try:
-            data = json.loads(stored)
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            return []
-
-    return []
-
-
-def save_tasks(tasks):
-    local_storage.setItem(
-        STORAGE_KEY,
-        json.dumps(tasks, ensure_ascii=False)
+    response = (
+        supabase
+        .table("tasks")
+        .select("*")
+        .order("created_at", desc=True)
+        .execute()
     )
 
-
-def normalize_tasks(tasks):
-    normalized = []
-    for task in tasks:
-        normalized.append(
-            {
-                "id": task.get("id", generate_id()),
-                "title": task.get("title", "").strip(),
-                "status": task.get("status", "未完了"),
-                "priority": task.get("priority", "中"),
-                "due_date": task.get("due_date", ""),
-                "memo": task.get("memo", ""),
-                "created_at": task.get("created_at", datetime.now().isoformat()),
-            }
-        )
-    return normalized
+    data = response.data if response.data else []
+    return [normalize_task(t) for t in data]
 
 
+def add_task_to_db(task: dict):
+    payload = {
+        "id": task["id"],
+        "title": task["title"],
+        "status": task["status"],
+        "priority": task["priority"],
+        "due_date": task["due_date"] if task["due_date"] else None,
+        "memo": task["memo"],
+    }
+    supabase.table("tasks").insert(payload).execute()
+
+
+def update_task_in_db(task: dict):
+    payload = {
+        "title": task["title"],
+        "status": task["status"],
+        "priority": task["priority"],
+        "due_date": task["due_date"] if task["due_date"] else None,
+        "memo": task["memo"],
+    }
+    supabase.table("tasks").update(payload).eq("id", task["id"]).execute()
+
+
+def delete_task_from_db(task_id: str):
+    supabase.table("tasks").delete().eq("id", task_id).execute()
+
+
+def delete_all_tasks_from_db():
+    # 全件削除
+    rows = supabase.table("tasks").select("id").execute()
+    ids = [row["id"] for row in (rows.data or [])]
+    for task_id in ids:
+        delete_task_from_db(task_id)
+
+
+# -----------------------------
+# View helpers
+# -----------------------------
 def get_priority_color(priority: str, status: str) -> str:
     if status == "完了":
         return "#9CA3AF"
@@ -209,30 +247,30 @@ def is_overdue(task):
     )
 
 
+# -----------------------------
+# Session init
+# -----------------------------
 if "tasks" not in st.session_state:
-    loaded = normalize_tasks(load_tasks())
-    st.session_state.tasks = loaded
+    st.session_state.tasks = load_tasks()
 
 if "selected_date" not in st.session_state:
     st.session_state.selected_date = None
 
-if "last_saved_json" not in st.session_state:
-    st.session_state.last_saved_json = json.dumps(
-        st.session_state.tasks,
-        ensure_ascii=False
-    )
+
+def refresh_tasks():
+    st.session_state.tasks = load_tasks()
 
 
-current_json = json.dumps(st.session_state.tasks, ensure_ascii=False)
-if current_json != st.session_state.last_saved_json:
-    save_tasks(st.session_state.tasks)
-    st.session_state.last_saved_json = current_json
-
-
+# -----------------------------
+# Header
+# -----------------------------
 st.title("✅ やることリスト + カレンダー")
-st.caption("同じブラウザなら、ページを閉じてもタスクが残る版")
+st.caption("Supabase 保存版: ページを閉じてもデータが残ります")
 
 
+# -----------------------------
+# Summary
+# -----------------------------
 all_tasks = st.session_state.tasks
 overall_progress = calculate_progress(all_tasks)
 today = date.today()
@@ -251,6 +289,9 @@ col_m4.metric("今月達成率", f"{month_progress}%")
 st.progress(min(overall_progress / 100, 1.0))
 
 
+# -----------------------------
+# Add task
+# -----------------------------
 with st.expander("＋ 新しいタスクを追加", expanded=True):
     with st.form("add_task_form", clear_on_submit=True):
         title = st.text_input("タスク名")
@@ -271,21 +312,22 @@ with st.expander("＋ 新しいタスクを追加", expanded=True):
                     "priority": priority,
                     "due_date": due_date.isoformat() if due_date else "",
                     "memo": memo.strip(),
-                    "created_at": datetime.now().isoformat(),
                 }
-                st.session_state.tasks.append(new_task)
-                save_tasks(st.session_state.tasks)
-                st.session_state.last_saved_json = json.dumps(
-                    st.session_state.tasks,
-                    ensure_ascii=False
-                )
+                add_task_to_db(new_task)
+                refresh_tasks()
                 st.success("タスクを追加しました。")
                 st.rerun()
 
 
+# -----------------------------
+# Layout
+# -----------------------------
 left_col, right_col = st.columns([1.15, 1.0])
 
 
+# -----------------------------
+# Calendar
+# -----------------------------
 with left_col:
     st.subheader("📅 カレンダー")
 
@@ -338,6 +380,9 @@ with left_col:
             st.rerun()
 
 
+# -----------------------------
+# Task list
+# -----------------------------
 with right_col:
     st.subheader("📝 タスク一覧")
 
@@ -382,11 +427,8 @@ with right_col:
 
                 if new_status != (task["status"] == "完了"):
                     task["status"] = "完了" if new_status else "未完了"
-                    save_tasks(st.session_state.tasks)
-                    st.session_state.last_saved_json = json.dumps(
-                        st.session_state.tasks,
-                        ensure_ascii=False
-                    )
+                    update_task_in_db(task)
+                    refresh_tasks()
                     st.rerun()
 
                 with st.expander("編集"):
@@ -423,37 +465,31 @@ with right_col:
                     )
 
                     btn1, btn2 = st.columns(2)
+
                     if btn1.button("保存", key=f"save_{task['id']}"):
                         task["title"] = edit_title.strip()
                         task["priority"] = edit_priority
                         task["due_date"] = "" if no_due else edit_due.isoformat()
                         task["memo"] = edit_memo.strip()
-                        save_tasks(st.session_state.tasks)
-                        st.session_state.last_saved_json = json.dumps(
-                            st.session_state.tasks,
-                            ensure_ascii=False
-                        )
+                        update_task_in_db(task)
+                        refresh_tasks()
                         st.success("更新しました。")
                         st.rerun()
 
                     if btn2.button("削除", key=f"delete_{task['id']}"):
-                        st.session_state.tasks = [
-                            t for t in st.session_state.tasks
-                            if t["id"] != task["id"]
-                        ]
-                        save_tasks(st.session_state.tasks)
-                        st.session_state.last_saved_json = json.dumps(
-                            st.session_state.tasks,
-                            ensure_ascii=False
-                        )
+                        delete_task_from_db(task["id"])
+                        refresh_tasks()
                         st.warning("削除しました。")
                         st.rerun()
 
 
+# -----------------------------
+# Utilities
+# -----------------------------
 st.divider()
 st.subheader("⚙️ 便利機能")
 
-u1, u2, u3 = st.columns(3)
+u1, u2, u3, u4 = st.columns(4)
 
 with u1:
     if st.button("今日のタスクだけ見る"):
@@ -474,22 +510,14 @@ with u2:
             st.success("期限切れタスクはありません。")
 
 with u3:
-    if st.button("全データを削除"):
-        st.session_state.tasks = []
-        save_tasks([])
-        st.session_state.last_saved_json = json.dumps([], ensure_ascii=False)
-        st.session_state.selected_date = None
+    if st.button("最新状態に更新"):
+        refresh_tasks()
+        st.success("再読み込みしました。")
         st.rerun()
 
-
-with st.expander("データ確認 / バックアップ"):
-    st.download_button(
-        label="JSONをダウンロード",
-        data=json.dumps(st.session_state.tasks, ensure_ascii=False, indent=2),
-        file_name="tasks_backup.json",
-        mime="application/json",
-    )
-    st.code(
-        json.dumps(st.session_state.tasks, ensure_ascii=False, indent=2),
-        language="json"
-    )
+with u4:
+    if st.button("全データを削除"):
+        delete_all_tasks_from_db()
+        refresh_tasks()
+        st.session_state.selected_date = None
+        st.rerun()
